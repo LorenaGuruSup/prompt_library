@@ -1,7 +1,15 @@
+const MESSAGE_SCOPE = "promptLibrary";
+const GENERAL_LIST_ID = "general";
+const GENERAL_LIST_NAME = "General";
+const SCHEMA_VERSION = 1;
+
 const DEFAULT_STATE = Object.freeze({
   lists: [],
   prompts: [],
-  activeListId: null,
+  settings: Object.freeze({
+    activeListId: null,
+    version: SCHEMA_VERSION,
+  }),
 });
 
 const listForm = document.getElementById("listForm");
@@ -21,81 +29,267 @@ const promptFormFields = promptForm
 
 const feedbackTimers = new WeakMap();
 
-const storageAdapter = (() => {
-  if (typeof chrome !== "undefined" && chrome?.storage) {
-    const area = chrome.storage.sync ?? chrome.storage.local;
+const backgroundClient = (() => {
+  if (typeof chrome !== "undefined" && chrome?.runtime?.sendMessage) {
+    const sendMessage = (action, payload) =>
+      new Promise((resolve, reject) => {
+        try {
+          chrome.runtime.sendMessage(
+            { scope: MESSAGE_SCOPE, action, payload },
+            (response) => {
+              if (chrome.runtime?.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+                return;
+              }
+              if (!response) {
+                reject(
+                  new Error(
+                    "Respuesta inválida del servicio en segundo plano.",
+                  ),
+                );
+                return;
+              }
+              if (response.ok === false) {
+                reject(new Error(response.error ?? "Operación rechazada."));
+                return;
+              }
+              resolve(response.data ?? null);
+            },
+          );
+        } catch (error) {
+          reject(error);
+        }
+      });
+
     return {
-      async get() {
-        return new Promise((resolve) => {
-          area.get(["promptLibrary"], (result) => {
-            if (chrome.runtime?.lastError) {
-              console.error(
-                "No se pudo leer el almacenamiento",
-                chrome.runtime.lastError,
-              );
-              resolve(null);
-              return;
-            }
-            resolve(result?.promptLibrary ?? null);
-          });
-        });
+      getState() {
+        return sendMessage("getState");
       },
-      async set(value) {
-        return new Promise((resolve) => {
-          area.set({ promptLibrary: value }, () => {
-            if (chrome.runtime?.lastError) {
-              console.error(
-                "No se pudo guardar en el almacenamiento",
-                chrome.runtime.lastError,
-              );
-            }
-            resolve();
-          });
-        });
+      createList(name) {
+        return sendMessage("createList", { name });
+      },
+      setActiveList(listId) {
+        return sendMessage("setActiveList", { listId });
+      },
+      createPrompt({ title, content, listId }) {
+        return sendMessage("createPrompt", { title, content, listId });
+      },
+      deletePrompt(promptId) {
+        return sendMessage("deletePrompt", { promptId });
+      },
+      deleteList(listId, destinationListId) {
+        return sendMessage("deleteList", { listId, destinationListId });
       },
     };
   }
 
-  let fallbackValue = null;
-  const hasLocalStorage =
-    typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+  const storage = (() => {
+    let fallbackValue = null;
+    const hasLocalStorage =
+      typeof window !== "undefined" &&
+      typeof window.localStorage !== "undefined";
+
+    return {
+      async get() {
+        if (fallbackValue) {
+          return cloneState(fallbackValue);
+        }
+        if (hasLocalStorage) {
+          try {
+            const stored = window.localStorage.getItem("promptLibrary");
+            if (!stored) {
+              return null;
+            }
+            fallbackValue = JSON.parse(stored);
+            return cloneState(fallbackValue);
+          } catch (error) {
+            console.error("No se pudo leer localStorage", error);
+          }
+        }
+        return fallbackValue ? cloneState(fallbackValue) : null;
+      },
+      async set(value) {
+        fallbackValue = cloneState(value);
+        if (hasLocalStorage) {
+          try {
+            window.localStorage.setItem(
+              "promptLibrary",
+              JSON.stringify(fallbackValue),
+            );
+          } catch (error) {
+            console.error("No se pudo guardar en localStorage", error);
+          }
+        }
+      },
+    };
+  })();
+
+  let fallbackState = null;
+
+  async function ensureFallbackState() {
+    if (fallbackState) {
+      return fallbackState;
+    }
+    const stored = await storage.get();
+    const normalized = normalizeState(stored);
+    fallbackState = normalized;
+    if (!areStatesEqual(stored, normalized)) {
+      await storage.set(normalized);
+    }
+    return fallbackState;
+  }
+
+  async function mutateFallback(mutator) {
+    const current = await ensureFallbackState();
+    const draft = cloneState(current);
+    mutator(draft);
+    const normalized = normalizeState(draft);
+    if (!areStatesEqual(current, normalized)) {
+      await storage.set(normalized);
+      fallbackState = normalized;
+    }
+    return cloneState(fallbackState ?? normalized);
+  }
 
   return {
-    async get() {
-      if (fallbackValue) {
-        return cloneState(fallbackValue);
-      }
-      if (hasLocalStorage) {
-        try {
-          const stored = window.localStorage.getItem("promptLibrary");
-          if (!stored) {
-            return null;
-          }
-          fallbackValue = JSON.parse(stored);
-          return cloneState(fallbackValue);
-        } catch (error) {
-          console.error("No se pudo leer localStorage", error);
-        }
-      }
-      return fallbackValue ? cloneState(fallbackValue) : null;
+    async getState() {
+      const current = await ensureFallbackState();
+      return cloneState(current);
     },
-    async set(value) {
-      fallbackValue = cloneState(value);
-      if (hasLocalStorage) {
-        try {
-          window.localStorage.setItem(
-            "promptLibrary",
-            JSON.stringify(fallbackValue),
-          );
-        } catch (error) {
-          console.error("No se pudo guardar en localStorage", error);
+    async createList(name) {
+      return mutateFallback((draft) => {
+        const trimmed = typeof name === "string" ? name.trim() : "";
+        if (!trimmed) {
+          throw new Error("El nombre de la lista es obligatorio.");
         }
-      }
+        const exists = draft.lists.some(
+          (list) => list.name.toLowerCase() === trimmed.toLowerCase(),
+        );
+        if (exists) {
+          throw new Error("Ya existe una lista con ese nombre.");
+        }
+        const newList = { id: generateId(), name: trimmed };
+        draft.lists.push(newList);
+        if (!draft.settings.activeListId) {
+          draft.settings.activeListId = newList.id;
+        }
+      });
+    },
+    async setActiveList(listId) {
+      return mutateFallback((draft) => {
+        const normalizedId =
+          typeof listId === "string"
+            ? listId.trim()
+            : String(listId ?? "").trim();
+        if (!normalizedId) {
+          throw new Error("La lista seleccionada no es válida.");
+        }
+        const exists = draft.lists.some((list) => list.id === normalizedId);
+        if (!exists) {
+          throw new Error("La lista seleccionada no existe.");
+        }
+        draft.settings.activeListId = normalizedId;
+      });
+    },
+    async createPrompt({ title, content, listId }) {
+      return mutateFallback((draft) => {
+        const normalizedContent =
+          typeof content === "string" ? content.trim() : "";
+        const normalizedTitle =
+          typeof title === "string" ? title.trim() : "";
+        const normalizedListId =
+          typeof listId === "string" && listId.trim()
+            ? listId.trim()
+            : draft.settings.activeListId;
+        if (!normalizedListId) {
+          throw new Error("No hay una lista activa seleccionada.");
+        }
+        if (!normalizedContent) {
+          throw new Error("El contenido del prompt es obligatorio.");
+        }
+        const exists = draft.lists.some((list) => list.id === normalizedListId);
+        if (!exists) {
+          throw new Error("La lista indicada no existe.");
+        }
+        draft.prompts.unshift({
+          id: generateId(),
+          listId: normalizedListId,
+          title: normalizedTitle,
+          content: normalizedContent,
+        });
+      });
+    },
+    async deletePrompt(promptId) {
+      return mutateFallback((draft) => {
+        const normalizedId =
+          typeof promptId === "string"
+            ? promptId.trim()
+            : String(promptId ?? "").trim();
+        if (!normalizedId) {
+          throw new Error("El identificador del prompt es obligatorio.");
+        }
+        const before = draft.prompts.length;
+        draft.prompts = draft.prompts.filter(
+          (prompt) => prompt.id !== normalizedId,
+        );
+        if (before === draft.prompts.length) {
+          throw new Error("El prompt indicado no existe.");
+        }
+      });
+    },
+    async deleteList(listId, destinationListId) {
+      return mutateFallback((draft) => {
+        const normalizedId =
+          typeof listId === "string"
+            ? listId.trim()
+            : String(listId ?? "").trim();
+        if (!normalizedId) {
+          throw new Error("La lista indicada no es válida.");
+        }
+        if (normalizedId === GENERAL_LIST_ID) {
+          throw new Error("La lista General no se puede eliminar.");
+        }
+        const exists = draft.lists.some((list) => list.id === normalizedId);
+        if (!exists) {
+          throw new Error("La lista indicada no existe.");
+        }
+        let destinationId = "";
+        if (destinationListId) {
+          destinationId =
+            typeof destinationListId === "string"
+              ? destinationListId.trim()
+              : String(destinationListId ?? "").trim();
+          if (destinationId === normalizedId) {
+            throw new Error("La lista de destino no puede ser la misma.");
+          }
+          const destinationExists = draft.lists.some(
+            (list) => list.id === destinationId,
+          );
+          if (!destinationExists) {
+            throw new Error("La lista de destino no existe.");
+          }
+        }
+        if (destinationId) {
+          draft.prompts = draft.prompts.map((prompt) =>
+            prompt.listId === normalizedId
+              ? { ...prompt, listId: destinationId }
+              : prompt,
+          );
+        } else {
+          draft.prompts = draft.prompts.filter(
+            (prompt) => prompt.listId !== normalizedId,
+          );
+        }
+        draft.lists = draft.lists.filter((list) => list.id !== normalizedId);
+        if (draft.settings.activeListId === normalizedId) {
+          draft.settings.activeListId = destinationId || GENERAL_LIST_ID;
+        }
+      });
     },
   };
 })();
 
-let state = cloneState(DEFAULT_STATE);
+let state = normalizeState(DEFAULT_STATE);
 
 init().catch((error) => {
   console.error("No se pudo inicializar la biblioteca de prompts", error);
@@ -104,11 +298,12 @@ init().catch((error) => {
 async function init() {
   render();
   attachEventListeners();
-  const storedState = await storageAdapter.get();
-  const normalizedState = normalizeState(storedState);
-  state = normalizedState;
-  if (!areStatesEqual(storedState, normalizedState)) {
-    await storageAdapter.set(normalizedState);
+  try {
+    const storedState = await backgroundClient.getState();
+    state = normalizeState(storedState);
+  } catch (error) {
+    console.error("No se pudo cargar el estado almacenado", error);
+    state = normalizeState(state);
   }
   render();
 }
@@ -121,38 +316,42 @@ function attachEventListeners() {
       if (!name) {
         return;
       }
-      await updateState((draft) => {
-        const newList = { id: generateId(), name };
-        draft.lists.push(newList);
-        if (!draft.activeListId) {
-          draft.activeListId = newList.id;
+      try {
+        const newState = await backgroundClient.createList(name);
+        state = normalizeState(newState);
+        render();
+        if (listForm) {
+          listForm.reset();
         }
-      });
-      if (listForm) {
-        listForm.reset();
+        listNameInput?.focus();
+      } catch (error) {
+        console.error("No se pudo crear la lista", error);
       }
-      listNameInput?.focus();
     });
   }
 
   if (activeListSelect) {
     activeListSelect.addEventListener("change", async (event) => {
       const selectedId = event.target.value;
-      if (!selectedId || selectedId === state.activeListId) {
+      if (!selectedId || selectedId === state.settings.activeListId) {
         return;
       }
-      await updateState((draft) => {
-        if (draft.lists.some((list) => list.id === selectedId)) {
-          draft.activeListId = selectedId;
-        }
-      });
+      try {
+        const newState = await backgroundClient.setActiveList(selectedId);
+        state = normalizeState(newState);
+        render();
+      } catch (error) {
+        console.error("No se pudo cambiar la lista activa", error);
+        activeListSelect.value = state.settings.activeListId ?? "";
+      }
     });
   }
 
   if (promptForm) {
     promptForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!state.activeListId) {
+      const activeListId = state.settings.activeListId;
+      if (!activeListId) {
         return;
       }
       const title = promptTitleInput?.value.trim();
@@ -160,32 +359,22 @@ function attachEventListeners() {
       if (!title || !content) {
         return;
       }
-      await updateState((draft) => {
-        draft.prompts.unshift({
-          id: generateId(),
-          listId: draft.activeListId,
+      try {
+        const newState = await backgroundClient.createPrompt({
           title,
           content,
+          listId: activeListId,
         });
-      });
-      if (promptForm) {
-        promptForm.reset();
+        state = normalizeState(newState);
+        render();
+        if (promptForm) {
+          promptForm.reset();
+        }
+        promptTitleInput?.focus();
+      } catch (error) {
+        console.error("No se pudo crear el prompt", error);
       }
-      promptTitleInput?.focus();
     });
-  }
-}
-
-async function updateState(mutator) {
-  try {
-    const draft = cloneState(state);
-    mutator(draft);
-    const normalized = normalizeState(draft);
-    await storageAdapter.set(normalized);
-    state = normalized;
-    render();
-  } catch (error) {
-    console.error("No se pudo actualizar el estado", error);
   }
 }
 
@@ -214,22 +403,21 @@ function renderListSelector() {
       const option = document.createElement("option");
       option.value = list.id;
       option.textContent = list.name;
-      option.selected = list.id === state.activeListId;
+      option.selected = list.id === state.settings.activeListId;
       activeListSelect.append(option);
     });
   }
 }
 
 function renderPromptForm() {
-  const hasActiveList = Boolean(state.activeListId);
+  const activeListId = state.settings.activeListId;
+  const hasActiveList = Boolean(activeListId);
   promptFormFields.forEach((field) => {
     field.disabled = !hasActiveList;
   });
   if (promptFormHelper) {
     if (hasActiveList) {
-      const activeList = state.lists.find(
-        (list) => list.id === state.activeListId,
-      );
+      const activeList = state.lists.find((list) => list.id === activeListId);
       const listName = activeList?.name ?? "";
       promptFormHelper.textContent =
         listName.trim().length > 0
@@ -248,8 +436,9 @@ function renderPromptCards() {
   }
 
   promptList.innerHTML = "";
-  const activePrompts = state.activeListId
-    ? state.prompts.filter((prompt) => prompt.listId === state.activeListId)
+  const activeListId = state.settings.activeListId;
+  const activePrompts = activeListId
+    ? state.prompts.filter((prompt) => prompt.listId === activeListId)
     : [];
 
   if (state.lists.length === 0) {
@@ -300,9 +489,13 @@ function createPromptCard(prompt) {
   deleteButton.className = "prompt-card__button prompt-card__button--danger";
   deleteButton.textContent = "Eliminar";
   deleteButton.addEventListener("click", async () => {
-    await updateState((draft) => {
-      draft.prompts = draft.prompts.filter((item) => item.id !== prompt.id);
-    });
+    try {
+      const newState = await backgroundClient.deletePrompt(prompt.id);
+      state = normalizeState(newState);
+      render();
+    } catch (error) {
+      console.error("No se pudo eliminar el prompt", error);
+    }
   });
 
   actions.append(copyButton, deleteButton);
@@ -365,12 +558,11 @@ function generateId() {
 }
 
 function cloneState(source) {
+  const activeListIdValue =
+    source?.settings?.activeListId ?? source?.activeListId ?? null;
   return {
     lists: Array.isArray(source?.lists)
-      ? source.lists.map((list) => ({
-          id: list.id,
-          name: list.name,
-        }))
+      ? source.lists.map((list) => ({ id: list.id, name: list.name }))
       : [],
     prompts: Array.isArray(source?.prompts)
       ? source.prompts.map((prompt) => ({
@@ -380,86 +572,119 @@ function cloneState(source) {
           content: prompt.content,
         }))
       : [],
-    activeListId: source?.activeListId ?? null,
+    settings: {
+      activeListId: activeListIdValue,
+      version: source?.settings?.version ?? SCHEMA_VERSION,
+    },
   };
 }
 
 function normalizeState(rawState) {
-  if (!rawState) {
-    return cloneState(DEFAULT_STATE);
+  const source = rawState ?? {};
+
+  const idMapping = new Map();
+  const seenListIds = new Set();
+  const lists = [];
+  const rawLists = Array.isArray(source.lists) ? source.lists : [];
+  rawLists.forEach((item) => {
+    const id = normalizeId(item?.id);
+    const name =
+      typeof item?.name === "string" ? item.name.trim() : String(item?.name ?? "").trim();
+    if (!id || !name || seenListIds.has(id)) {
+      return;
+    }
+    lists.push({ id, name });
+    seenListIds.add(id);
+  });
+
+  let generalIndex = lists.findIndex((list) => list.id === GENERAL_LIST_ID);
+  if (generalIndex === -1) {
+    generalIndex = lists.findIndex(
+      (list) => list.name.toLowerCase() === GENERAL_LIST_NAME.toLowerCase(),
+    );
+    if (generalIndex !== -1) {
+      const generalList = lists.splice(generalIndex, 1)[0];
+      if (generalList.id !== GENERAL_LIST_ID) {
+        idMapping.set(generalList.id, GENERAL_LIST_ID);
+        generalList.id = GENERAL_LIST_ID;
+      }
+      generalList.name = GENERAL_LIST_NAME;
+      lists.unshift(generalList);
+    } else {
+      lists.unshift({ id: GENERAL_LIST_ID, name: GENERAL_LIST_NAME });
+    }
+  } else {
+    const generalList = lists[generalIndex];
+    if (generalIndex > 0) {
+      lists.splice(generalIndex, 1);
+      lists.unshift(generalList);
+    }
+    if (generalList.name !== GENERAL_LIST_NAME) {
+      generalList.name = GENERAL_LIST_NAME;
+    }
   }
 
-  const listIds = new Set();
-  const lists = Array.isArray(rawState.lists)
-    ? rawState.lists.reduce((acc, item) => {
-        const idValue =
-          typeof item?.id === "string"
-            ? item.id.trim()
-            : item?.id != null
-            ? String(item.id)
-            : "";
-        const nameValue =
-          typeof item?.name === "string" ? item.name.trim() : "";
-        if (!idValue || !nameValue || listIds.has(idValue)) {
-          return acc;
-        }
-        listIds.add(idValue);
-        acc.push({ id: idValue, name: nameValue });
-        return acc;
-      }, [])
-    : [];
+  const listIds = new Set(lists.map((list) => list.id));
 
-  const prompts = Array.isArray(rawState.prompts)
-    ? rawState.prompts.reduce((acc, item) => {
-        const idValue =
-          typeof item?.id === "string"
-            ? item.id.trim()
-            : item?.id != null
-            ? String(item.id)
-            : "";
-        const listIdValue =
-          typeof item?.listId === "string"
-            ? item.listId.trim()
-            : item?.listId != null
-            ? String(item.listId)
-            : "";
-        const titleValue =
-          typeof item?.title === "string" ? item.title.trim() : "";
-        const contentValue =
-          typeof item?.content === "string" ? item.content.trim() : "";
-        if (
-          !idValue ||
-          !listIdValue ||
-          !contentValue ||
-          !listIds.has(listIdValue)
-        ) {
-          return acc;
-        }
-        acc.push({
-          id: idValue,
-          listId: listIdValue,
-          title: titleValue,
-          content: contentValue,
-        });
-        return acc;
-      }, [])
-    : [];
+  const prompts = [];
+  const seenPromptIds = new Set();
+  const rawPrompts = Array.isArray(source.prompts) ? source.prompts : [];
+  rawPrompts.forEach((item) => {
+    const id = normalizeId(item?.id);
+    if (!id || seenPromptIds.has(id)) {
+      return;
+    }
+    seenPromptIds.add(id);
 
-  let activeListId =
-    typeof rawState.activeListId === "string"
-      ? rawState.activeListId
-      : rawState.activeListId != null
-      ? String(rawState.activeListId)
-      : null;
+    let listId = normalizeId(item?.listId);
+    if (idMapping.has(listId)) {
+      listId = idMapping.get(listId);
+    }
+    if (!listId || !listIds.has(listId)) {
+      listId = GENERAL_LIST_ID;
+    }
+
+    const title =
+      typeof item?.title === "string" ? item.title.trim() : "";
+    const content =
+      typeof item?.content === "string"
+        ? item.content.trim()
+        : String(item?.content ?? "").trim();
+    if (!content) {
+      return;
+    }
+
+    prompts.push({ id, listId, title, content });
+  });
+
+  const activeListIdRaw =
+    source?.settings?.activeListId ?? source?.activeListId ?? null;
+  let activeListId = normalizeId(activeListIdRaw);
+  if (idMapping.has(activeListId)) {
+    activeListId = idMapping.get(activeListId);
+  }
   if (!activeListId || !listIds.has(activeListId)) {
-    activeListId = lists[0]?.id ?? null;
+    activeListId = lists[0]?.id ?? GENERAL_LIST_ID;
   }
 
   return {
     lists,
     prompts,
-    activeListId,
+    settings: {
+      activeListId,
+      version: SCHEMA_VERSION,
+    },
   };
+}
+
+function normalizeId(value) {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (value != null) {
+    return String(value).trim();
+  }
+  return "";
 }
 
 function areStatesEqual(a, b) {

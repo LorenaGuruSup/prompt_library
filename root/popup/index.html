@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Biblioteca de Prompts</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup__header">
+        <h1 class="popup__title">Biblioteca de Prompts</h1>
+        <p class="popup__subtitle">Organiza tus listas y guarda tus mejores ideas.</p>
+      </header>
+
+      <section class="card">
+        <h2 class="card__title">Listas</h2>
+        <form id="listForm" class="form" autocomplete="off">
+          <label class="form__label" for="listName">Nombre de la nueva lista</label>
+          <div class="form__row">
+            <input
+              id="listName"
+              class="input"
+              type="text"
+              name="listName"
+              placeholder="Ej. Redes sociales"
+              required
+              maxlength="60"
+            />
+            <button class="button button--primary" type="submit">Crear</button>
+          </div>
+        </form>
+
+        <label class="form__label" for="activeListSelect">Lista activa</label>
+        <select id="activeListSelect" class="input input--select" name="activeList">
+          <option value="" disabled selected>Sin listas disponibles</option>
+        </select>
+      </section>
+
+      <section class="card">
+        <h2 class="card__title">Nuevo prompt</h2>
+        <p id="promptFormHelper" class="form__helper">
+          Selecciona o crea una lista activa para guardar un nuevo prompt.
+        </p>
+        <form id="promptForm" class="form" autocomplete="off">
+          <label class="form__label" for="promptTitle">Título</label>
+          <input
+            id="promptTitle"
+            class="input"
+            type="text"
+            name="promptTitle"
+            placeholder="Ej. Lanzamiento de producto"
+            required
+            maxlength="80"
+          />
+
+          <label class="form__label" for="promptContent">Contenido</label>
+          <textarea
+            id="promptContent"
+            class="input input--textarea"
+            name="promptContent"
+            rows="4"
+            placeholder="Escribe aquí el prompt completo"
+            required
+            maxlength="1500"
+          ></textarea>
+
+          <button class="button button--primary" type="submit">Guardar prompt</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="card__header">
+          <h2 class="card__title">Prompts guardados</h2>
+          <span id="promptCount" class="badge" aria-live="polite">0</span>
+        </div>
+        <p id="promptEmpty" class="empty-message" hidden>
+          Crea una lista para comenzar a guardar tus prompts.
+        </p>
+        <div id="promptList" class="prompt-list" role="list"></div>
+      </section>
+    </main>
+
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

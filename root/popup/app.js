@@ -1,13 +1,13 @@
 const MESSAGE_SCOPE = "promptLibrary";
 const GENERAL_LIST_ID = "general";
 const GENERAL_LIST_NAME = "General";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const DEFAULT_STATE = Object.freeze({
   lists: [],
   prompts: [],
   settings: Object.freeze({
-    activeListId: null,
+    lista_activa_id: null,
     version: SCHEMA_VERSION,
   }),
 });
@@ -163,15 +163,26 @@ const backgroundClient = (() => {
           throw new Error("El nombre de la lista es obligatorio.");
         }
         const exists = draft.lists.some(
-          (list) => list.name.toLowerCase() === trimmed.toLowerCase(),
+          (list) => list.nombre.toLowerCase() === trimmed.toLowerCase(),
         );
         if (exists) {
           throw new Error("Ya existe una lista con ese nombre.");
         }
-        const newList = { id: generateId(), name: trimmed };
+        const now = new Date().toISOString();
+        const maxOrder = draft.lists.reduce(
+          (acc, list) => Math.max(acc, typeof list.orden === "number" ? list.orden : -1),
+          -1,
+        );
+        const newList = {
+          id: generateId(),
+          nombre: trimmed,
+          creado_en: now,
+          actualizado_en: now,
+          orden: maxOrder + 1,
+        };
         draft.lists.push(newList);
-        if (!draft.settings.activeListId) {
-          draft.settings.activeListId = newList.id;
+        if (!draft.settings.lista_activa_id) {
+          draft.settings.lista_activa_id = newList.id;
         }
       });
     },
@@ -188,7 +199,7 @@ const backgroundClient = (() => {
         if (!exists) {
           throw new Error("La lista seleccionada no existe.");
         }
-        draft.settings.activeListId = normalizedId;
+        draft.settings.lista_activa_id = normalizedId;
       });
     },
     async createPrompt({ title, content, listId }) {
@@ -200,7 +211,7 @@ const backgroundClient = (() => {
         const normalizedListId =
           typeof listId === "string" && listId.trim()
             ? listId.trim()
-            : draft.settings.activeListId;
+            : draft.settings.lista_activa_id;
         if (!normalizedListId) {
           throw new Error("No hay una lista activa seleccionada.");
         }
@@ -211,12 +222,19 @@ const backgroundClient = (() => {
         if (!exists) {
           throw new Error("La lista indicada no existe.");
         }
+        const now = new Date().toISOString();
         draft.prompts.unshift({
           id: generateId(),
-          listId: normalizedListId,
-          title: normalizedTitle,
-          content: normalizedContent,
+          lista_id: normalizedListId,
+          titulo: normalizedTitle,
+          cuerpo: normalizedContent,
+          creado_en: now,
+          actualizado_en: now,
         });
+        const targetList = draft.lists.find((list) => list.id === normalizedListId);
+        if (targetList) {
+          targetList.actualizado_en = now;
+        }
       });
     },
     async deletePrompt(promptId) {
@@ -228,12 +246,23 @@ const backgroundClient = (() => {
         if (!normalizedId) {
           throw new Error("El identificador del prompt es obligatorio.");
         }
+        const targetPrompt = draft.prompts.find(
+          (prompt) => prompt.id === normalizedId,
+        );
         const before = draft.prompts.length;
         draft.prompts = draft.prompts.filter(
           (prompt) => prompt.id !== normalizedId,
         );
         if (before === draft.prompts.length) {
           throw new Error("El prompt indicado no existe.");
+        }
+        if (targetPrompt) {
+          const parentList = draft.lists.find(
+            (list) => list.id === targetPrompt.lista_id,
+          );
+          if (parentList) {
+            parentList.actualizado_en = new Date().toISOString();
+          }
         }
       });
     },
@@ -270,19 +299,24 @@ const backgroundClient = (() => {
           }
         }
         if (destinationId) {
+          const now = new Date().toISOString();
           draft.prompts = draft.prompts.map((prompt) =>
-            prompt.listId === normalizedId
-              ? { ...prompt, listId: destinationId }
+            prompt.lista_id === normalizedId
+              ? { ...prompt, lista_id: destinationId, actualizado_en: now }
               : prompt,
           );
+          const destinationList = draft.lists.find((list) => list.id === destinationId);
+          if (destinationList) {
+            destinationList.actualizado_en = now;
+          }
         } else {
           draft.prompts = draft.prompts.filter(
-            (prompt) => prompt.listId !== normalizedId,
+            (prompt) => prompt.lista_id !== normalizedId,
           );
         }
         draft.lists = draft.lists.filter((list) => list.id !== normalizedId);
-        if (draft.settings.activeListId === normalizedId) {
-          draft.settings.activeListId = destinationId || GENERAL_LIST_ID;
+        if (draft.settings.lista_activa_id === normalizedId) {
+          draft.settings.lista_activa_id = destinationId || GENERAL_LIST_ID;
         }
       });
     },
@@ -333,7 +367,7 @@ function attachEventListeners() {
   if (activeListSelect) {
     activeListSelect.addEventListener("change", async (event) => {
       const selectedId = event.target.value;
-      if (!selectedId || selectedId === state.settings.activeListId) {
+      if (!selectedId || selectedId === state.settings.lista_activa_id) {
         return;
       }
       try {
@@ -342,7 +376,7 @@ function attachEventListeners() {
         render();
       } catch (error) {
         console.error("No se pudo cambiar la lista activa", error);
-        activeListSelect.value = state.settings.activeListId ?? "";
+        activeListSelect.value = state.settings.lista_activa_id ?? "";
       }
     });
   }
@@ -350,7 +384,7 @@ function attachEventListeners() {
   if (promptForm) {
     promptForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const activeListId = state.settings.activeListId;
+      const activeListId = state.settings.lista_activa_id;
       if (!activeListId) {
         return;
       }
@@ -402,15 +436,15 @@ function renderListSelector() {
     state.lists.forEach((list) => {
       const option = document.createElement("option");
       option.value = list.id;
-      option.textContent = list.name;
-      option.selected = list.id === state.settings.activeListId;
+      option.textContent = list.nombre;
+      option.selected = list.id === state.settings.lista_activa_id;
       activeListSelect.append(option);
     });
   }
 }
 
 function renderPromptForm() {
-  const activeListId = state.settings.activeListId;
+  const activeListId = state.settings.lista_activa_id;
   const hasActiveList = Boolean(activeListId);
   promptFormFields.forEach((field) => {
     field.disabled = !hasActiveList;
@@ -418,7 +452,7 @@ function renderPromptForm() {
   if (promptFormHelper) {
     if (hasActiveList) {
       const activeList = state.lists.find((list) => list.id === activeListId);
-      const listName = activeList?.name ?? "";
+      const listName = activeList?.nombre ?? "";
       promptFormHelper.textContent =
         listName.trim().length > 0
           ? `El prompt se guardará en «${listName}».`
@@ -436,9 +470,9 @@ function renderPromptCards() {
   }
 
   promptList.innerHTML = "";
-  const activeListId = state.settings.activeListId;
+  const activeListId = state.settings.lista_activa_id;
   const activePrompts = activeListId
-    ? state.prompts.filter((prompt) => prompt.listId === activeListId)
+    ? state.prompts.filter((prompt) => prompt.lista_id === activeListId)
     : [];
 
   if (state.lists.length === 0) {
@@ -466,11 +500,11 @@ function createPromptCard(prompt) {
 
   const title = document.createElement("h3");
   title.className = "prompt-card__title";
-  title.textContent = prompt.title || "Sin título";
+  title.textContent = prompt.titulo || "Sin título";
 
   const content = document.createElement("p");
   content.className = "prompt-card__content";
-  content.textContent = prompt.content;
+  content.textContent = prompt.cuerpo;
 
   const actions = document.createElement("div");
   actions.className = "prompt-card__actions";
@@ -480,7 +514,7 @@ function createPromptCard(prompt) {
   copyButton.className = "prompt-card__button";
   copyButton.textContent = "Copiar";
   copyButton.addEventListener("click", async () => {
-    const copied = await copyToClipboard(prompt.content);
+    const copied = await copyToClipboard(prompt.cuerpo);
     setButtonFeedback(copyButton, copied ? "Copiado" : "Error");
   });
 
@@ -558,22 +592,28 @@ function generateId() {
 }
 
 function cloneState(source) {
-  const activeListIdValue =
-    source?.settings?.activeListId ?? source?.activeListId ?? null;
   return {
     lists: Array.isArray(source?.lists)
-      ? source.lists.map((list) => ({ id: list.id, name: list.name }))
+      ? source.lists.map((list) => ({
+          id: list.id,
+          nombre: list.nombre,
+          creado_en: list.creado_en,
+          actualizado_en: list.actualizado_en,
+          orden: list.orden,
+        }))
       : [],
     prompts: Array.isArray(source?.prompts)
       ? source.prompts.map((prompt) => ({
           id: prompt.id,
-          listId: prompt.listId,
-          title: prompt.title,
-          content: prompt.content,
+          lista_id: prompt.lista_id,
+          titulo: prompt.titulo,
+          cuerpo: prompt.cuerpo,
+          creado_en: prompt.creado_en,
+          actualizado_en: prompt.actualizado_en,
         }))
       : [],
     settings: {
-      activeListId: activeListIdValue,
+      lista_activa_id: source?.settings?.lista_activa_id ?? null,
       version: source?.settings?.version ?? SCHEMA_VERSION,
     },
   };
@@ -581,26 +621,50 @@ function cloneState(source) {
 
 function normalizeState(rawState) {
   const source = rawState ?? {};
+  const now = new Date().toISOString();
 
   const idMapping = new Map();
   const seenListIds = new Set();
-  const lists = [];
+  let lists = [];
   const rawLists = Array.isArray(source.lists) ? source.lists : [];
-  rawLists.forEach((item) => {
+  rawLists.forEach((item, index) => {
     const id = normalizeId(item?.id);
-    const name =
-      typeof item?.name === "string" ? item.name.trim() : String(item?.name ?? "").trim();
-    if (!id || !name || seenListIds.has(id)) {
+    const nombreRaw =
+      typeof item?.nombre === "string"
+        ? item.nombre
+        : typeof item?.name === "string"
+        ? item.name
+        : String(item?.nombre ?? item?.name ?? "");
+    const nombre = nombreRaw.trim();
+    if (!id || !nombre || seenListIds.has(id)) {
       return;
     }
-    lists.push({ id, name });
+
+    const creadoEn = normalizeDate(
+      item?.creado_en ?? item?.created_at ?? item?.createdAt,
+      now,
+    );
+    const actualizadoEn = normalizeDate(
+      item?.actualizado_en ?? item?.updated_at ?? item?.updatedAt,
+      creadoEn,
+    );
+    const ordenFuente = Number(item?.orden ?? item?.order ?? index);
+    const orden = Number.isFinite(ordenFuente) ? ordenFuente : index;
+
+    lists.push({
+      id,
+      nombre,
+      creado_en: creadoEn,
+      actualizado_en: actualizadoEn,
+      orden,
+    });
     seenListIds.add(id);
   });
 
   let generalIndex = lists.findIndex((list) => list.id === GENERAL_LIST_ID);
   if (generalIndex === -1) {
     generalIndex = lists.findIndex(
-      (list) => list.name.toLowerCase() === GENERAL_LIST_NAME.toLowerCase(),
+      (list) => list.nombre.toLowerCase() === GENERAL_LIST_NAME.toLowerCase(),
     );
     if (generalIndex !== -1) {
       const generalList = lists.splice(generalIndex, 1)[0];
@@ -608,10 +672,16 @@ function normalizeState(rawState) {
         idMapping.set(generalList.id, GENERAL_LIST_ID);
         generalList.id = GENERAL_LIST_ID;
       }
-      generalList.name = GENERAL_LIST_NAME;
+      generalList.nombre = GENERAL_LIST_NAME;
       lists.unshift(generalList);
     } else {
-      lists.unshift({ id: GENERAL_LIST_ID, name: GENERAL_LIST_NAME });
+      lists.unshift({
+        id: GENERAL_LIST_ID,
+        nombre: GENERAL_LIST_NAME,
+        creado_en: now,
+        actualizado_en: now,
+        orden: 0,
+      });
     }
   } else {
     const generalList = lists[generalIndex];
@@ -619,10 +689,15 @@ function normalizeState(rawState) {
       lists.splice(generalIndex, 1);
       lists.unshift(generalList);
     }
-    if (generalList.name !== GENERAL_LIST_NAME) {
-      generalList.name = GENERAL_LIST_NAME;
+    if (generalList.nombre !== GENERAL_LIST_NAME) {
+      generalList.nombre = GENERAL_LIST_NAME;
     }
   }
+
+  lists = lists.map((list, index) => ({
+    ...list,
+    orden: index,
+  }));
 
   const listIds = new Set(lists.map((list) => list.id));
 
@@ -636,45 +711,90 @@ function normalizeState(rawState) {
     }
     seenPromptIds.add(id);
 
-    let listId = normalizeId(item?.listId);
-    if (idMapping.has(listId)) {
-      listId = idMapping.get(listId);
+    let listaId = normalizeId(item?.lista_id ?? item?.listId);
+    if (idMapping.has(listaId)) {
+      listaId = idMapping.get(listaId);
     }
-    if (!listId || !listIds.has(listId)) {
-      listId = GENERAL_LIST_ID;
+    if (!listaId || !listIds.has(listaId)) {
+      listaId = GENERAL_LIST_ID;
     }
 
-    const title =
-      typeof item?.title === "string" ? item.title.trim() : "";
-    const content =
-      typeof item?.content === "string"
-        ? item.content.trim()
-        : String(item?.content ?? "").trim();
-    if (!content) {
+    const tituloRaw =
+      typeof item?.titulo === "string"
+        ? item.titulo
+        : typeof item?.title === "string"
+        ? item.title
+        : "";
+    const titulo = tituloRaw.trim();
+    const cuerpoRaw =
+      typeof item?.cuerpo === "string"
+        ? item.cuerpo
+        : typeof item?.content === "string"
+        ? item.content
+        : String(item?.cuerpo ?? item?.content ?? "");
+    const cuerpo = cuerpoRaw.trim();
+    if (!cuerpo) {
       return;
     }
 
-    prompts.push({ id, listId, title, content });
+    const creadoEn = normalizeDate(
+      item?.creado_en ?? item?.created_at ?? item?.createdAt,
+      now,
+    );
+    const actualizadoEn = normalizeDate(
+      item?.actualizado_en ?? item?.updated_at ?? item?.updatedAt,
+      creadoEn,
+    );
+
+    prompts.push({
+      id,
+      lista_id: listaId,
+      titulo,
+      cuerpo,
+      creado_en: creadoEn,
+      actualizado_en: actualizadoEn,
+    });
   });
 
-  const activeListIdRaw =
-    source?.settings?.activeListId ?? source?.activeListId ?? null;
-  let activeListId = normalizeId(activeListIdRaw);
-  if (idMapping.has(activeListId)) {
-    activeListId = idMapping.get(activeListId);
+  const listaActivaIdRaw =
+    source?.settings?.lista_activa_id ??
+    source?.settings?.activeListId ??
+    source?.lista_activa_id ??
+    source?.activeListId ??
+    null;
+  let listaActivaId = normalizeId(listaActivaIdRaw);
+  if (idMapping.has(listaActivaId)) {
+    listaActivaId = idMapping.get(listaActivaId);
   }
-  if (!activeListId || !listIds.has(activeListId)) {
-    activeListId = lists[0]?.id ?? GENERAL_LIST_ID;
+  if (!listaActivaId || !listIds.has(listaActivaId)) {
+    listaActivaId = lists[0]?.id ?? GENERAL_LIST_ID;
   }
 
   return {
     lists,
     prompts,
     settings: {
-      activeListId,
+      lista_activa_id: listaActivaId,
       version: SCHEMA_VERSION,
     },
   };
+}
+
+function normalizeDate(value, fallback) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  } else if (value instanceof Date) {
+    return value.toISOString();
+  } else if (value != null) {
+    const stringified = String(value).trim();
+    if (stringified) {
+      return stringified;
+    }
+  }
+  return fallback;
 }
 
 function normalizeId(value) {
